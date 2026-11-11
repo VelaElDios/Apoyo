@@ -1,0 +1,445 @@
+################################################################################
+#                PRÁCTICA EXAMEN SPRINT 2 - COMPRAR MODELOS 3D                  #
+################################################################################
+
+ANTES DE EMPEZAR (rama desde development)
+--------------------------------------------------------------------------------
+    git checkout development
+    git pull
+    git checkout -b practica-examen
+
+AL TERMINAR CADA EJERCICIO
+--------------------------------------------------------------------------------
+    cd test/AppForSEII.UT
+    dotnet test                      -> todos en verde
+    cd ../..
+    git add .
+    git commit -m "..."
+    git push -u origin practica-examen
+
+
+################################################################################
+#  EJERCICIO 1 - GET SELECT: GetModelos3DParaComprar                            #
+################################################################################
+
+ENUNCIADO
+--------------------------------------------------------------------------------
+Modifica GetModelos3DParaComprar para que:
+ 1. Acepte un parámetro opcional "formato" (FormatoModelo3D?) y filtre por él.
+ 2. Acepte un parámetro opcional "precioMaximo" (decimal?) y devuelva solo los
+    modelos con Precio <= precioMaximo.
+ 3. Si precioMaximo <= 0 -> BadRequest con el error:
+    "Error! El precio máximo debe ser mayor que 0"
+ 4. Devuelva solo modelos cuya licencia NO haya caducado
+    (FechaExpiracion >= hoy).
+ 5. Ordene por Precio ascendente y, a igual precio, por Nombre ascendente.
+
+
+================================================================================
+[1] ARCHIVO: src/AppForSEII.API/Controllers/Modelos3DController/Modelos3DController.cs
+    QUÉ: SUSTITUIR el método GetModelos3DParaComprar entero
+================================================================================
+
+        // GET: api/Modelos3D/GetModelos3DParaComprar
+        [HttpGet]
+        [Route("[action]")]
+        [ProducesResponseType(typeof(IList<Modelo3DParaComprarDTO>), (int)HttpStatusCode.OK)]
+        [ProducesResponseType(typeof(ValidationProblemDetails), (int)HttpStatusCode.BadRequest)]   // <- NUEVO
+        public async Task<ActionResult> GetModelos3DParaComprar(string? nombre, string? categoria,
+            FormatoModelo3D? formato, decimal? precioMaximo)                                       // <- NUEVOS PARÁMETROS
+        {
+            // NUEVO: validación del precio máximo
+            if (precioMaximo != null && precioMaximo <= 0)
+            {
+                ModelState.AddModelError("precioMaximo", "Error! El precio máximo debe ser mayor que 0");
+                return BadRequest(new ValidationProblemDetails(ModelState));
+            }
+
+            var modelosBD = await _context.Modelos3D
+                .Include(m => m.Licencia)
+                .Where(m => m.Licencia.FechaExpiracion >= DateTime.Today                // NUEVO: licencia no caducada
+                         && (nombre == null || m.Nombre.Contains(nombre))
+                         && (categoria == null || m.Categoria == categoria)
+                         && (formato == null || m.Formato == formato))                    // NUEVO: filtro formato
+                .ToListAsync();
+
+            // El filtro y la ordenación por precio van DESPUÉS del ToListAsync:
+            // SQLite (la BD de los tests) no sabe comparar ni ordenar decimal dentro de la consulta.
+            IList<Modelo3DParaComprarDTO> modelos = modelosBD
+                .Where(m => precioMaximo == null || m.Precio <= precioMaximo)            // NUEVO: precio máximo
+                .OrderBy(m => m.Precio)                                                   // CAMBIADO: antes era Nombre
+                .ThenBy(m => m.Nombre)                                                    // NUEVO
+                .Select(m => new Modelo3DParaComprarDTO(m.Id, m.Nombre, m.Categoria,
+                    m.Licencia.Nombre, m.Formato, m.Precio))
+                .ToList();
+
+            return Ok(modelos);
+        }
+
+
+================================================================================
+[2] ARCHIVO: test/AppForSEII.UT/Modelos3DController_test/GetModelos3DParaComprar_test.cs
+    QUÉ: SUSTITUIR el archivo entero
+    (cambian: constructor -> modelo caducado | casos -> nuevo orden y nuevos
+     parámetros | método test -> 4 parámetros | NUEVO test de BadRequest)
+================================================================================
+
+using AppForSEII.API.Controllers;
+using AppForSEII.API.DTOs.Modelo3DDTOs;
+
+namespace AppForSEII.UT.Modelos3DController_test
+{
+    public class GetModelos3DParaComprar_test : AppForSEII4SqliteUT
+    {
+        public GetModelos3DParaComprar_test()
+        {
+            var licenciaPersonal = new LicenciaModelo3D("Uso personal", new DateTime(2027, 12, 31));
+            var licenciaComercial = new LicenciaModelo3D("Uso comercial", new DateTime(2028, 6, 30));
+            var licenciaCaducada = new LicenciaModelo3D("Caducada", new DateTime(2020, 1, 1));       // NUEVO
+
+            var modelos = new List<Modelo3D>() {
+                new Modelo3D("Dragón articulado", "Miniaturas", FormatoModelo3D.STL, 12.99m, licenciaPersonal),
+                new Modelo3D("Engranaje de repuesto", "Repuestos", FormatoModelo3D.OBJ, 3.20m, licenciaComercial),
+                new Modelo3D("Maceta geométrica", "Decoración", FormatoModelo3D.TresMF, 6.75m, licenciaPersonal),
+                new Modelo3D("Zapato viejo", "Decoración", FormatoModelo3D.STL, 1.00m, licenciaCaducada), // NUEVO (id 4, nunca debe salir)
+            };
+
+            _context.AddRange(modelos);
+            _context.SaveChanges();
+        }
+
+        public static IEnumerable<object?[]> TestCasesFor_GetModelos3DParaComprar()
+        {
+            var dragonDTO = new Modelo3DParaComprarDTO(1, "Dragón articulado", "Miniaturas", "Uso personal", FormatoModelo3D.STL, 12.99m);
+            var engranajeDTO = new Modelo3DParaComprarDTO(2, "Engranaje de repuesto", "Repuestos", "Uso comercial", FormatoModelo3D.OBJ, 3.20m);
+            var macetaDTO = new Modelo3DParaComprarDTO(3, "Maceta geométrica", "Decoración", "Uso personal", FormatoModelo3D.TresMF, 6.75m);
+
+            // nombre, categoria, formato, precioMaximo, resultado esperado (ORDEN POR PRECIO)
+            var allTests = new List<object?[]>
+            {
+                // Sin filtros: todos menos el caducado, ordenados por precio
+                new object?[] { null, null, null, null, new List<Modelo3DParaComprarDTO>() { engranajeDTO, macetaDTO, dragonDTO } },
+                new object?[] { "Dragón", null, null, null, new List<Modelo3DParaComprarDTO>() { dragonDTO } },
+                new object?[] { null, "Repuestos", null, null, new List<Modelo3DParaComprarDTO>() { engranajeDTO } },
+                new object?[] { "Maceta", "Decoración", null, null, new List<Modelo3DParaComprarDTO>() { macetaDTO } },
+                new object?[] { "Dragón", "Repuestos", null, null, new List<Modelo3DParaComprarDTO>() },
+                // NUEVO: formato STL (el zapato también es STL pero está caducado -> no sale)
+                new object?[] { null, null, FormatoModelo3D.STL, null, new List<Modelo3DParaComprarDTO>() { dragonDTO } },
+                // NUEVO: precio máximo 7
+                new object?[] { null, null, null, 7m, new List<Modelo3DParaComprarDTO>() { engranajeDTO, macetaDTO } },
+                // NUEVO: formato + precio sin resultados
+                new object?[] { null, null, FormatoModelo3D.OBJ, 3m, new List<Modelo3DParaComprarDTO>() },
+            };
+
+            return allTests;
+        }
+
+        [Theory]
+        [Trait("LevelTesting", "Unit Testing")]
+        [MemberData(nameof(TestCasesFor_GetModelos3DParaComprar))]
+        public async Task GetModelos3DParaComprar_OK_test(string? nombre, string? categoria,
+            FormatoModelo3D? formato, decimal? precioMaximo, List<Modelo3DParaComprarDTO> expectedModelos)   // CAMBIADO
+        {
+            // Arrange
+            var mock = new Mock<ILogger<Modelos3DController>>();
+            ILogger<Modelos3DController> logger = mock.Object;
+            var controller = new Modelos3DController(_context, logger);
+
+            // Act
+            var result = await controller.GetModelos3DParaComprar(nombre, categoria, formato, precioMaximo); // CAMBIADO
+
+            // Assert
+            var okResult = Assert.IsType<OkObjectResult>(result);
+            var modelosDTOActual = Assert.IsType<List<Modelo3DParaComprarDTO>>(okResult.Value);
+            Assert.Equal(expectedModelos, modelosDTOActual);
+        }
+
+        // NUEVO: precio máximo inválido
+        [Fact]
+        [Trait("LevelTesting", "Unit Testing")]
+        public async Task GetModelos3DParaComprar_PrecioMaximoInvalido_test()
+        {
+            // Arrange
+            var mock = new Mock<ILogger<Modelos3DController>>();
+            ILogger<Modelos3DController> logger = mock.Object;
+            var controller = new Modelos3DController(_context, logger);
+
+            // Act
+            var result = await controller.GetModelos3DParaComprar(null, null, null, 0);
+
+            // Assert
+            var badRequestResult = Assert.IsType<BadRequestObjectResult>(result);
+            var problemDetails = Assert.IsType<ValidationProblemDetails>(badRequestResult.Value);
+            Assert.Equal("Error! El precio máximo debe ser mayor que 0", problemDetails.Errors.First().Value[0]);
+        }
+    }
+}
+
+
+################################################################################
+#  EJERCICIO 2 - GET DETAIL: GetCompraModelo3D                                  #
+################################################################################
+
+ENUNCIADO
+--------------------------------------------------------------------------------
+Modifica GetCompraModelo3D para que:
+ 1. LineaCompraModeloDTO tenga una nueva propiedad bool LicenciaProximaACaducar:
+    true si FechaExpiracion de la licencia < FechaCompra + 1 mes (FA 7.4).
+ 2. Las líneas se devuelvan ordenadas por Subtotal DESCENDENTE.
+ 3. Si id <= 0 -> BadRequest con el error:
+    "Error! El identificador de la compra no es válido"   (en vez de NotFound)
+
+
+================================================================================
+[1] ARCHIVO: src/AppForSEII.API/DTOs/Modelo3DDTOs/LineaCompraModeloDTO.cs
+    QUÉ: AÑADIR propiedad + parámetro en constructor + Equals + GetHashCode
+================================================================================
+
+  --- CONSTRUCTOR: añadir el parámetro AL FINAL, con valor por defecto ---
+      (así el POST y los tests que ya llaman al constructor siguen compilando)
+
+    public LineaCompraModeloDTO(int modeloId, string nombre, string categoria, FormatoModelo3D formato,
+        string licencia, DateTime fechaExpiracionLicencia, int cantidadLicencias, decimal precioUnidad, decimal subtotal,
+        bool licenciaProximaACaducar = false)                                  // <- NUEVO
+    {
+        ...
+        Subtotal = subtotal;
+        LicenciaProximaACaducar = licenciaProximaACaducar;                     // <- NUEVO
+    }
+
+  --- PROPIEDAD: añadir debajo de Subtotal ---
+
+    public bool LicenciaProximaACaducar { get; set; }
+
+  --- EQUALS: añadir al final, antes del ; ---
+
+               Subtotal == dto.Subtotal &&
+               LicenciaProximaACaducar == dto.LicenciaProximaACaducar;
+
+  --- GETHASHCODE: añadir antes del return ---
+
+        hash.Add(LicenciaProximaACaducar);
+
+
+================================================================================
+[2] ARCHIVO: src/AppForSEII.API/Controllers/Modelos3DController/ComprasModelo3DController.cs
+    QUÉ: SUSTITUIR el método GetCompraModelo3D entero
+================================================================================
+
+        // GET: api/ComprasModelo3D/5
+        [HttpGet]
+        [Route("{id}")]
+        [ProducesResponseType(typeof(CompraModelo3DDetalleDTO), (int)HttpStatusCode.OK)]
+        [ProducesResponseType(typeof(ValidationProblemDetails), (int)HttpStatusCode.BadRequest)]   // <- NUEVO
+        [ProducesResponseType((int)HttpStatusCode.NotFound)]
+        public async Task<ActionResult> GetCompraModelo3D(int id)
+        {
+            // NUEVO: id inválido
+            if (id <= 0)
+            {
+                ModelState.AddModelError("id", "Error! El identificador de la compra no es válido");
+                return BadRequest(new ValidationProblemDetails(ModelState));
+            }
+
+            CompraModelo3D? compra = await _context.ComprasModelo3D
+                .Include(c => c.Lineas)
+                    .ThenInclude(l => l.Modelo)
+                        .ThenInclude(m => m.Licencia)
+                .FirstOrDefaultAsync(c => c.Id == id);
+
+            if (compra == null)
+            {
+                _logger.LogError($"Error: la compra de modelos 3D con id {id} no existe");
+                return NotFound();
+            }
+
+            var compraDTO = new CompraModelo3DDetalleDTO(compra.Id, compra.NombreCliente, compra.ApellidosCliente,
+                compra.CorreoElectronico, compra.DireccionFacturacion, compra.FechaCompra, compra.PrecioTotal,
+                compra.MetodoPago, compra.Descripcion,
+                compra.Lineas
+                    .OrderByDescending(l => l.Subtotal)                                            // <- NUEVO
+                    .Select(l => new LineaCompraModeloDTO(l.Modelo.Id, l.Modelo.Nombre, l.Modelo.Categoria,
+                        l.Modelo.Formato, l.Modelo.Licencia.Nombre, l.Modelo.Licencia.FechaExpiracion,
+                        l.CantidadLicencias, l.PrecioUnidad, l.Subtotal,
+                        l.Modelo.Licencia.FechaExpiracion < compra.FechaCompra.AddMonths(1)))      // <- NUEVO
+                    .ToList());
+
+            return Ok(compraDTO);
+        }
+
+
+================================================================================
+[3] ARCHIVO: test/AppForSEII.UT/Modelos3DController_test/GetCompraModelo3D_test.cs
+    QUÉ: CAMBIAR datos + test NotFound + test Found | AÑADIR test BadRequest
+================================================================================
+
+  --- CAMBIAR la fecha de la licencia comercial (para que caduque en < 1 mes) ---
+
+        private readonly DateTime _fechaExpiracionComercial = new DateTime(2026, 11, 20);
+
+  --- CONSTRUCTOR: CAMBIAR la línea del engranaje (10 licencias -> subtotal 32,00
+      mayor que 25,98 del dragón, así se comprueba el orden) y el precio total ---
+
+            var compra = new CompraModelo3D(_fechaCompra, "Peter", "Jackson", "peter@uclm.es",
+                "Campus Universitario s/n, Albacete", "Para imprimir en clase", 57.98m, MetodoPago.PayPal, cliente);  // 57.98
+
+            compra.Lineas.Add(new LineaCompraModelo(2, 12.99m, dragon, compra));
+            compra.Lineas.Add(new LineaCompraModelo(10, 3.20m, engranaje, compra));                                  // 10
+
+  --- TEST NotFound: CAMBIAR el id 0 por 99 (el 0 ahora es BadRequest) ---
+
+            var result = await controller.GetCompraModelo3D(99);
+
+  --- TEST Found: CAMBIAR expectedCompra (total 57.98, engranaje PRIMERO y con true) ---
+
+            var expectedCompra = new CompraModelo3DDetalleDTO(1, "Peter", "Jackson", "peter@uclm.es",
+                "Campus Universitario s/n, Albacete", _fechaCompra, 57.98m, MetodoPago.PayPal, "Para imprimir en clase",
+                new List<LineaCompraModeloDTO>() {
+                    new LineaCompraModeloDTO(2, "Engranaje de repuesto", "Repuestos", FormatoModelo3D.OBJ,
+                        "Uso comercial", _fechaExpiracionComercial, 10, 3.20m, 32.00m, true),
+                    new LineaCompraModeloDTO(1, "Dragón articulado", "Miniaturas", FormatoModelo3D.STL,
+                        "Uso personal", _fechaExpiracionPersonal, 2, 12.99m, 25.98m, false)
+                });
+
+  --- AÑADIR test nuevo (id inválido) ---
+
+        [Theory]
+        [Trait("LevelTesting", "Unit Testing")]
+        [InlineData(0)]
+        [InlineData(-1)]
+        public async Task GetCompraModelo3D_IdInvalido_test(int id)
+        {
+            // Arrange
+            var mock = new Mock<ILogger<ComprasModelo3DController>>();
+            ILogger<ComprasModelo3DController> logger = mock.Object;
+            var controller = new ComprasModelo3DController(_context, logger);
+
+            // Act
+            var result = await controller.GetCompraModelo3D(id);
+
+            // Assert
+            var badRequestResult = Assert.IsType<BadRequestObjectResult>(result);
+            var problemDetails = Assert.IsType<ValidationProblemDetails>(badRequestResult.Value);
+            Assert.Equal("Error! El identificador de la compra no es válido", problemDetails.Errors.First().Value[0]);
+        }
+
+
+################################################################################
+#  EJERCICIO 3 - POST: CreateCompraModelo3D                                     #
+################################################################################
+
+ENUNCIADO
+--------------------------------------------------------------------------------
+Modifica CreateCompraModelo3D para que devuelva BadRequest si:
+ 1. Descripcion no es nula y no empieza (StartsWith) por "Compra de ".
+    Error: "Error! La descripción de la compra no tiene el formato correcto"
+ 2. El mismo modelo 3D aparece más de una vez en las líneas.
+    Error: "Error! Uno de los modelos 3D está repetido en la compra"
+ 3. La licencia de algún modelo ya ha caducado en la fecha de la compra.
+    Error: "Error! Uno de los modelos 3D tiene la licencia caducada"
+ 4. MetodoPago es TarjetaCredito y el precio total supera 100 €.
+    Error: "Error! Las compras de más de 100 € deben pagarse con PayPal"
+
+
+================================================================================
+[1] ARCHIVO: src/AppForSEII.API/Controllers/Modelos3DController/ComprasModelo3DController.cs
+    QUÉ: AÑADIR 4 validaciones en el método CreateCompraModelo3D
+================================================================================
+
+  --- (1) y (2): AÑADIR justo DESPUÉS de la validación de Bizum ---
+
+            if (compraParaCrear.Descripcion != null && !compraParaCrear.Descripcion.StartsWith("Compra de "))
+                ModelState.AddModelError("Descripcion", "Error! La descripción de la compra no tiene el formato correcto");
+
+            if (compraParaCrear.Lineas.GroupBy(l => l.ModeloId).Any(g => g.Count() > 1))
+                ModelState.AddModelError("Lineas", "Error! Uno de los modelos 3D está repetido en la compra");
+
+  --- (3): DENTRO del foreach, AÑADIR un else if ANTES del else final ---
+
+                if (modelo == null)
+                    ModelState.AddModelError("Lineas", $"Error! El modelo 3D con id {lineaParaCrear.ModeloId} no existe");
+                else if (lineaParaCrear.CantidadLicencias < 1)
+                    ModelState.AddModelError("Lineas", $"Error! La cantidad de licencias del modelo {modelo.Nombre} debe ser al menos 1");
+                else if (modelo.Licencia.FechaExpiracion < compra.FechaCompra.Date)                                  // <- NUEVO
+                    ModelState.AddModelError("Lineas", "Error! Uno de los modelos 3D tiene la licencia caducada");    // <- NUEVO
+                else
+                    compra.Lineas.Add(new LineaCompraModelo(lineaParaCrear.CantidadLicencias, modelo.Precio, modelo, compra));
+
+  --- (4): AÑADIR justo DESPUÉS de calcular el precio total (antes de _context.Add) ---
+
+            compra.PrecioTotal = compra.Lineas.Sum(l => l.Subtotal);
+
+            if (compra.MetodoPago == MetodoPago.TarjetaCredito && compra.PrecioTotal > 100)                  // <- NUEVO
+            {
+                ModelState.AddModelError("MetodoPago", "Error! Las compras de más de 100 € deben pagarse con PayPal");
+                return BadRequest(new ValidationProblemDetails(ModelState));
+            }
+
+            _context.Add(compra);
+
+
+================================================================================
+[2] ARCHIVO: test/AppForSEII.UT/Modelos3DController_test/CreateCompraModelo3D_test.cs
+    QUÉ: CAMBIAR constructor + helper + éxito | AÑADIR 4 casos al Theory
+    OJO: la descripción actual "Para imprimir en clase" ya NO es válida
+         -> sin cambiarla fallarían TODOS los tests.
+================================================================================
+
+  --- CONSTRUCTOR: AÑADIR un modelo con licencia caducada (será el id 3) ---
+
+            var licenciaCaducada = new LicenciaModelo3D("Caducada", new DateTime(2020, 1, 1));
+
+            var modelos = new List<Modelo3D>() {
+                new Modelo3D("Dragón articulado", "Miniaturas", FormatoModelo3D.STL, 12.99m, licenciaPersonal),
+                new Modelo3D("Engranaje de repuesto", "Repuestos", FormatoModelo3D.OBJ, 3.20m, licenciaComercial),
+                new Modelo3D("Zapato viejo", "Decoración", FormatoModelo3D.STL, 1.00m, licenciaCaducada),   // NUEVO
+            };
+
+  --- HELPER CompraParaCrear: AÑADIR parámetro descripcion con valor por defecto VÁLIDO ---
+
+        private static CompraModelo3DDetalleDTO CompraParaCrear(string correo, MetodoPago metodoPago,
+            IList<LineaCompraModeloDTO> lineas, string? descripcion = "Compra de modelos para clase")
+        {
+            return new CompraModelo3DDetalleDTO(0, "Peter", "Jackson", correo, "Campus Universitario s/n, Albacete",
+                DateTime.Today, 0, metodoPago, descripcion, lineas);
+        }
+
+  --- THEORY DE ERRORES: AÑADIR estos 4 casos a la lista allTests ---
+
+                // NUEVO (1) Descripción con formato incorrecto
+                new object[] { CompraParaCrear("peter@uclm.es", MetodoPago.PayPal,
+                    new List<LineaCompraModeloDTO>() { LineaParaCrear(1, 1) }, "Para imprimir en clase"),
+                    "Error! La descripción de la compra no tiene el formato correcto" },
+                // NUEVO (2) Modelo repetido
+                new object[] { CompraParaCrear("peter@uclm.es", MetodoPago.PayPal,
+                    new List<LineaCompraModeloDTO>() { LineaParaCrear(1, 1), LineaParaCrear(1, 2) }),
+                    "Error! Uno de los modelos 3D está repetido en la compra" },
+                // NUEVO (3) Licencia caducada (modelo 3)
+                new object[] { CompraParaCrear("peter@uclm.es", MetodoPago.PayPal,
+                    new List<LineaCompraModeloDTO>() { LineaParaCrear(3, 1) }),
+                    "Error! Uno de los modelos 3D tiene la licencia caducada" },
+                // NUEVO (4) Tarjeta y más de 100 € (8 x 12,99 = 103,92)
+                new object[] { CompraParaCrear("peter@uclm.es", MetodoPago.TarjetaCredito,
+                    new List<LineaCompraModeloDTO>() { LineaParaCrear(1, 8) }),
+                    "Error! Las compras de más de 100 € deben pagarse con PayPal" },
+
+  --- TEST SUCCESS: CAMBIAR la descripción del expectedCompra ---
+
+                "Campus Universitario s/n, Albacete", DateTime.Today, 29.18m, MetodoPago.PayPal, "Compra de modelos para clase",
+
+  --- (OPCIONAL, cobertura completa de la condición 4): éxito con tarjeta y <= 100 € ---
+      Copiar el test Success, usar MetodoPago.TarjetaCredito y comprobar que
+      devuelve CreatedAtActionResult.
+
+
+################################################################################
+#  RECORDATORIOS RÁPIDOS                                                        #
+################################################################################
+ - Mensaje de error: COPIARLO EXACTO (mayúsculas, tildes, puntos).
+ - Cada caso del Theory de errores debe provocar UN SOLO error (se compara el primero).
+ - Si cambias la firma de un método o un constructor -> arreglar TODAS sus llamadas
+   (controlador y tests). Truco: parámetro nuevo al final con valor por defecto.
+ - Comparar/ordenar decimal en la consulta falla en SQLite (tests) -> hacerlo
+   después del ToListAsync().
+ - Si un test antiguo falla tras el cambio, casi siempre es porque sus datos ya
+   no cumplen la nueva regla (ej: la descripción del Ejercicio 3).
